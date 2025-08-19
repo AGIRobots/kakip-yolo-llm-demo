@@ -1,0 +1,104 @@
+// =================================================================
+// 【1箇所目】
+// 65行目にある、#include <mutex>の直後に以下を追加します。
+// =================================================================
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
+static const char* YOLO_FIFO_PATH = "/tmp/yolo_fifo";
+
+
+// =================================================================
+// 【2箇所目】
+// R_Post_Proc関数の直前に以下を追加します。
+// =================================================================
+static inline const std::string& get_label_safe(int idx) {
+    static const std::string kUnknown = "unknown";
+    if (idx >= 0 && idx < (int)label_file_map.size()) {
+        return label_file_map[idx];
+    }
+    return kUnknown;
+}
+
+static std::string json_escape(const std::string& s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) {
+        switch (c) {
+            case '\"': out += "\\\""; break;
+            case '\\': out += "\\\\"; break;
+            case '\b': out += "\\b";  break;
+            case '\f': out += "\\f";  break;
+            case '\n': out += "\\n";  break;
+            case '\r': out += "\\r";  break;
+            case '\t': out += "\\t";  break;
+            default:
+                if ((unsigned char)c < 0x20) {
+                }
+                out += c;
+        }
+    }
+    return out;
+}
+
+static std::string detections_to_json_line(const std::vector<detection>& items) {
+    std::ostringstream oss;
+    oss.setf(std::ios::fixed);
+    oss.precision(6);
+
+    oss << "[";
+    for (size_t i = 0; i < items.size(); ++i) {
+        const auto& d = items[i];
+
+        const double x_norm = static_cast<double>(d.bbox.x) / static_cast<double>(DRPAI_IN_WIDTH);
+        const double y_norm = static_cast<double>(d.bbox.y) / static_cast<double>(DRPAI_IN_HEIGHT);
+        const double w_norm = static_cast<double>(d.bbox.w) / static_cast<double>(DRPAI_IN_WIDTH);
+        const double h_norm = static_cast<double>(d.bbox.h) / static_cast<double>(DRPAI_IN_HEIGHT);
+
+        const double xmin = (static_cast<double>(d.bbox.x) - 0.5 * static_cast<double>(d.bbox.w)) / static_cast<double>(DRPAI_IN_WIDTH);
+        const double ymin = (static_cast<double>(d.bbox.y) - 0.5 * static_cast<double>(d.bbox.h)) / static_cast<double>(DRPAI_IN_HEIGHT);
+        const double xmax = (static_cast<double>(d.bbox.x) + 0.5 * static_cast<double>(d.bbox.w)) / static_cast<double>(DRPAI_IN_WIDTH);
+        const double ymax = (static_cast<double>(d.bbox.y) + 0.5 * static_cast<double>(d.bbox.h)) / static_cast<double>(DRPAI_IN_HEIGHT);
+
+        auto clip01 = [](double v){ return v < 0.0 ? 0.0 : (v > 1.0 ? 1.0 : v); };
+
+        oss << "{"
+            << "\"x\":"      << static_cast<int>(d.bbox.x)
+            << ",\"y\":"     << static_cast<int>(d.bbox.y)
+            << ",\"w\":"     << static_cast<int>(d.bbox.w)
+            << ",\"h\":"     << static_cast<int>(d.bbox.h)
+            << ",\"class\":" << static_cast<int>(d.c)
+            << ",\"label\":\"" << json_escape(get_label_safe(static_cast<int>(d.c))) << "\""
+            << ",\"prob\":"  << d.prob
+            << ",\"x_norm\":" << clip01(x_norm)
+            << ",\"y_norm\":" << clip01(y_norm)
+            << ",\"w_norm\":" << clip01(w_norm)
+            << ",\"h_norm\":" << clip01(h_norm)
+            << ",\"xyxy_norm\":[" << clip01(xmin) << "," << clip01(ymin) << "," << clip01(xmax) << "," << clip01(ymax) << "]"
+            << "}";
+
+        if (i + 1 < items.size()) oss << ",";
+    }
+    oss << "]\n";
+    return oss.str();
+}
+
+static void publish_detections_to_fifo(const std::vector<detection>& items) {
+    if (access(YOLO_FIFO_PATH, F_OK) != 0) {
+        mkfifo(YOLO_FIFO_PATH, 0666);
+    }
+    int fd = open(YOLO_FIFO_PATH, O_WRONLY | O_NONBLOCK);
+    if (fd < 0) {
+        return;
+    }
+    std::string line = detections_to_json_line(items);
+    (void)write(fd, line.data(), line.size());
+    close(fd);
+}
+
+
+// =================================================================
+// 【3箇所目】
+// R_Img_Thread関数のdraw_bounding_box();の直後に以下を追加します。
+// =================================================================
+publish_detections_to_fifo(print_det);
